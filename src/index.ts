@@ -34,8 +34,6 @@ const classifiers: ((row: Row) => Promise<Classification>)[] = [
         if (!row.before.parent) return {aok: true}
         if (!row.after.parent) return {aok: true}
 
-        console.log(`checking ${row.id}`)
-
         return sql`SELECT
                        p.id,
                        os.after->>'name' AS createName,
@@ -68,17 +66,20 @@ const classifiers: ((row: Row) => Promise<Classification>)[] = [
                        WHERE os2.identifier = os.identifier
                        )
                    ORDER BY
-                       os.created;
+                       os.created DESC;
         `
             .then(rowList => {
                 if (rowList.length <= 0 ) {
                     return {aok: true}
                 }
-                console.log(`${row.id} update row match needs identifier`, rowList)
 
                 return {
                     aok: false, propose: () => {
-                        console.log("------ Found a parent change insert pattern missing identifier ---", rowList)
+                        return sql`UPDATE clade_transactions
+                            SET identifier = ${rowList[0].missing_identifier}
+                            WHERE id = ${rowList[0].id_getting_identifier}
+                       `.then(() => console.log(`${rowList[0].id_getting_identifier} => ${rowList[0].missing_identifier}`))
+                            .catch(console.log)
                     }
                 }
             }).catch(m => {
@@ -86,6 +87,8 @@ const classifiers: ((row: Row) => Promise<Classification>)[] = [
                 return {aok: false, why: m}
             })
     },
+
+    // if you don't have an identifier check if there is a previous transaction with the same name
 
     // if there is an update or destroy without an identifier
     // look previous in time to look for CREATE with an AFTER name that matches the update ord estroys BEFORE name
@@ -159,11 +162,16 @@ const classifiers: ((row: Row) => Promise<Classification>)[] = [
     }
 ];
 
-sql`SELECT *
-    FROM clade_transactions WHERE id not like '%-%'`.cursor(200, async a => {
+sql`SELECT clade_transactions.*
+    FROM clade_transactions 
+    LEFT OUTER JOIN clades ON (identifier = clades.id OR after->>'parent' = clades.id)
+    WHERE clades.id is null
+    AND (mode != 'DESTROY' OR identifier is NULL)
+    ORDER BY created`.cursor(200, async a => {
     Promise.allSettled(a.flatMap(r => classifiers.map(c => c(r))))
         .then(psr => psr.filter(p => p.status == "fulfilled"))
         .then(ar => ar.map(psr => psr.value))
-        .then(classifications => classifications.forEach(c => c.propose?.()))
+        .then(cl => { console.log(`Classification count: ${cl.length}`); return cl;})
+        .then(classifications => Promise.allSettled(classifications.map(c => c.propose?.())))
 }).then(r => console.log("done"));
 
